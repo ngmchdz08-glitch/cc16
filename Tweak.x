@@ -22,25 +22,12 @@ static inline NSDictionary *vcam_prefs(void) {
     return p ?: @{};
 }
 
-static BOOL vcam_enabled(void) {
-    return [vcam_prefs()[@"isEnabled"] boolValue];
-}
-
 // ─────────────────────────────────────────────────────────────
 // MARK: Shared helpers
 // ─────────────────────────────────────────────────────────────
 
 static void vcam_savePrefs(NSMutableDictionary *p) {
     [p writeToFile:kPrefsPath atomically:YES];
-}
-
-static CIContext *vcam_ciCtx(void) {
-    static CIContext *ctx;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        ctx = [CIContext contextWithOptions:@{kCIContextUseSoftwareRenderer: @NO}];
-    });
-    return ctx;
 }
 
 // vcam_fakeSampleBuffer removed (moved to CameraHook.x logic)
