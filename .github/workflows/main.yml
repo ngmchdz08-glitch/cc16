@@ -1,0 +1,173 @@
+name: Build Vcam_Mch
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build .deb (${{ matrix.scheme }} - ${{ matrix.arch }})
+    runs-on: macos-14
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scheme: [rootless, roothide]
+        arch: [arm64, arm64e]
+        include:
+          - scheme: rootless
+            theos_repo: theos/theos
+          - scheme: roothide
+            theos_repo: roothide/theos
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 1. Cache + Clone Theos ───────────────────────────────────
+      - name: Cache Theos
+        id: cache-theos
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: theos-macos-${{ matrix.scheme }}-v14
+          restore-keys: theos-macos-${{ matrix.scheme }}-
+
+      - name: Clone Theos
+        if: steps.cache-theos.outputs.cache-hit != 'true'
+        run: |
+          rm -rf $GITHUB_WORKSPACE/theos
+          git clone --recursive https://github.com/${{ matrix.theos_repo }}.git $GITHUB_WORKSPACE/theos
+
+      # ── 2. Cache + Download SDK ──────────────────────────────────
+      - name: Cache SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos/sdks/iPhoneOS15.6.sdk
+          key: sdk-ios156-macos-v2
+
+      - name: Download iOS 15.6 SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/theos/sdks
+          curl -fsSL \
+            "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS15.6.sdk.tar.xz" \
+            -o /tmp/sdk.tar.xz
+          tar -xJf /tmp/sdk.tar.xz -C $GITHUB_WORKSPACE/theos/sdks
+
+      # ── 3. Install deps ──────────────────────────────────────────
+      - name: Install build deps
+        run: |
+          brew install dpkg
+          curl -fsSL \
+            "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_macosx_arm64" \
+            -o /usr/local/bin/ldid
+          chmod +x /usr/local/bin/ldid
+
+      # ── 4. Fix CRLF on control file only ─────────────────────────
+      - name: Fix line endings
+        run: |
+          tr -d '\r' < control > control.tmp && mv control.tmp control
+
+      # ── 5. Build ─────────────────────────────────────────────────
+      - name: Build .deb
+        run: |
+          export THEOS=$GITHUB_WORKSPACE/theos
+          export PATH=$THEOS/bin:$PATH
+          export ARCHS="${{ matrix.arch }}"
+          export TARGET="iphone:clang:15.6:15.0"
+          export THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
+          export STRIP=0
+
+          mkdir -p packages
+
+          make package \
+            FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
+            STRIP=0 \
+            2>&1 | tee $GITHUB_WORKSPACE/build.log
+
+          BUILD_EXIT=${PIPESTATUS[0]}
+          echo "===== Build exit: $BUILD_EXIT ====="
+
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "BUILD FAILED"
+            exit $BUILD_EXIT
+          fi
+
+          ls -la packages/
+
+      # ── 6. Repack deb: fix Architecture + relocate to /var/jb ────
+      - name: Repack deb
+        run: |
+          cd packages
+          DEB_FILE=$(ls *.deb 2>/dev/null | head -n 1)
+          if [ -z "$DEB_FILE" ]; then
+            echo "ERROR: No .deb found in packages/"
+            exit 1
+          fi
+
+          echo "=== Original deb: $DEB_FILE ==="
+
+          # 1. Giải nén
+          mkdir -p tmp_pkg
+          dpkg-deb -R "$DEB_FILE" tmp_pkg
+
+          echo "=== Original file tree ==="
+          find tmp_pkg -type f | head -50
+
+          # 2. Fix Architecture trong DEBIAN/control
+          if [ "${{ matrix.arch }}" = "arm64e" ]; then
+            TARGET_ARCH="iphoneos-arm64e"
+          else
+            TARGET_ARCH="iphoneos-arm64"
+          fi
+
+          # Strip CRLF khỏi control
+          tr -d '\r' < tmp_pkg/DEBIAN/control > tmp_pkg/DEBIAN/control.tmp
+          mv tmp_pkg/DEBIAN/control.tmp tmp_pkg/DEBIAN/control
+          # Ghi đè Architecture
+          sed -i '' "s|^Architecture:.*|Architecture: ${TARGET_ARCH}|" tmp_pkg/DEBIAN/control
+
+          # 3. Relocate: di chuyển mọi thứ từ root sang /var/jb/
+          #    Nếu có /Applications → /var/jb/Applications
+          #    Nếu có /Library     → /var/jb/Library
+          #    Nếu có /usr         → /var/jb/usr
+          #    Bỏ qua DEBIAN (metadata)
+          mkdir -p tmp_pkg/var/jb
+
+          for dir in Applications Library usr; do
+            if [ -d "tmp_pkg/$dir" ]; then
+              echo "Relocating /$dir → /var/jb/$dir"
+              mkdir -p "tmp_pkg/var/jb/$dir"
+              cp -a "tmp_pkg/$dir/." "tmp_pkg/var/jb/$dir/"
+              rm -rf "tmp_pkg/$dir"
+            fi
+          done
+
+          echo "=== Fixed control file ==="
+          cat tmp_pkg/DEBIAN/control
+
+          echo "=== Fixed file tree ==="
+          find tmp_pkg -type f | head -50
+
+          # 4. Đóng gói lại
+          NEW_NAME="Vcam_Mch_${{ matrix.scheme }}_${{ matrix.arch }}.deb"
+          dpkg-deb -b tmp_pkg "$NEW_NAME"
+          rm -rf tmp_pkg "$DEB_FILE"
+
+          echo "=== Final package ==="
+          ls -la "$NEW_NAME"
+
+      # ── 7. Upload ────────────────────────────────────────────────
+      - name: Upload .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vcam_Mch-${{ matrix.scheme }}-${{ matrix.arch }}-${{ github.run_number }}
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
