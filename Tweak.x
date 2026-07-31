@@ -16,11 +16,7 @@
 #define kOBSFramePath @"/var/mobile/Media/vcam_cache/obs_frame.jpg"
 #define kCacheDir @"/var/mobile/Media/vcam_cache"
 
-static inline NSDictionary *vcam_prefs(void) {
-    NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
-    if (!p) p = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.weat.vcamera.plist"];
-    return p ?: @{};
-}
+// vcam_prefs removed to fix -Wunused-function
 
 // ─────────────────────────────────────────────────────────────
 // MARK: Shared helpers
